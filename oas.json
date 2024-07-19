@@ -1,0 +1,167 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Forms Creation API",
+    "description": "API to create Google Forms.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://smartforms-ai.com"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "FormRequest": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Title of the form.",
+            "example": "Sample Form"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "Type of the question (text, paragraph, multipleChoice, etc.).",
+                  "example": "multipleChoice"
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Title of the question.",
+                  "example": "Choose your favorite color"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "example": "Red"
+                  },
+                  "description": "Options for the question (if applicable).",
+                  "example": ["Red", "Green", "Blue"]
+                }
+              },
+              "required": [
+                "type",
+                "title"
+              ]
+            },
+            "description": "List of questions for the form.",
+            "example": [
+              {
+                "type": "text",
+                "title": "What is your name?"
+              },
+              {
+                "type": "multipleChoice",
+                "title": "Choose your favorite color",
+                "options": ["Red", "Green", "Blue"]
+              }
+            ]
+          }
+        },
+        "required": [
+          "title",
+          "questions"
+        ]
+      },
+      "FormResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "message": {
+            "type": "string",
+            "example": "Form created successfully"
+          },
+          "formId": {
+            "type": "string",
+            "example": "1FAIpQLSdJm__example"
+          },
+          "formUrl": {
+            "type": "string",
+            "example": "https://docs.google.com/forms/d/e/1FAIpQLSdJm__example/viewform"
+          }
+        },
+        "required": [
+          "status",
+          "message"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "error"
+          },
+          "message": {
+            "type": "string",
+            "example": "Internal Server Error"
+          }
+        },
+        "required": [
+          "status",
+          "message"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/create-form": {
+      "post": {
+        "summary": "Create a Google Form",
+        "operationId": "createForm",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
