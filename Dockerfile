@@ -1,10 +1,20 @@
-FROM node:18
+# Use Node.js LTS version as the base image
+FROM node:18-slim
 
-WORKDIR /usr/src/app
+# Set working directory
+WORKDIR /app
 
+# Copy package files to install dependencies first
 COPY package*.json ./
-RUN npm install --only=production
 
+# Install dependencies
+RUN npm install --production
+
+# Copy the rest of the application files
 COPY . .
 
-CMD [ "node", "index.js" ]
+# Expose port 8080 and set the environment variable
+ENV PORT=8080
+
+# Start the application
+CMD ["npm", "start"]
