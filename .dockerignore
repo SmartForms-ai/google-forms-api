@@ -1,0 +1,25 @@
+# Exclude virtual environments
+venv/
+env/
+
+# Exclude Node modules
+node_modules/
+
+# Exclude Git files
+.git/
+.gitignore
+
+# Exclude Docker files
+.dockerignore
+
+# Exclude Python cache files
+__pycache__/
+*.pyc
+
+# Exclude environment files
+.env
+.env.local
+
+# Exclude logs and temp files
+*.log
+tmp/
