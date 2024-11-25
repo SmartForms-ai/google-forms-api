@@ -9,16 +9,16 @@
   "dependencies": {
     "axios": "^0.21.4",
     "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
     "dotenv": "^8.6.0",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
     "googleapis": "^144.0.0",
     "mongodb": "^6.8.1",
     "mongodb-memory-server": "^10.0.0",
-    "mongoose": "^8.5.2",
+    "mongoose": "^8.8.0",
     "open": "^10.1.0",
     "redis": "^4.7.0",
-    "winston": "^3.14.1",
-    "cors": "^2.8.5"
+    "winston": "^3.14.1"
   }
 }

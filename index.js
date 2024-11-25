@@ -1,3 +1,5 @@
+// index.js
+
 const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
@@ -11,10 +13,38 @@ app.use(express.json());
 
 // Environment variables
 const PORT = process.env.PORT || 8080;
-const OPENAI_PLUGIN_ID = process.env.OPENAI_PLUGIN_ID;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const OPENAI_REDIRECT_URI = process.env.OPENAI_REDIRECT_URI;
+const MONGO_URI = process.env.MONGO_URI; // Add MongoDB URI
+
+// Import Mongoose
+const mongoose = require('mongoose');
+
+// Connect to MongoDB Atlas
+mongoose.connect(MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+const db = mongoose.connection;
+
+db.on('connected', () => {
+  console.log('Connected to MongoDB Atlas');
+});
+
+db.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
+});
+
+// Define User schema and model
+const userSchema = new mongoose.Schema({
+  email: { type: String, unique: true, required: true },
+  usageCount: { type: Number, default: 0 },
+  hasPaid: { type: Boolean, default: false },
+});
+
+const User = mongoose.model('User', userSchema);
 
 // Root endpoint for health checks
 app.get('/', (req, res) => {
@@ -54,6 +84,7 @@ app.get('/oauth/authorize', async (req, res) => {
       'https://www.googleapis.com/auth/forms',
       'https://www.googleapis.com/auth/drive.file',
       'https://www.googleapis.com/auth/drive.metadata.readonly',
+      'https://www.googleapis.com/auth/userinfo.email', // Added to get the user's email
     ],
     state: openaiState, // Pass OpenAI's state parameter to Google
     prompt: 'consent',
@@ -168,17 +199,41 @@ app.post('/create-form', async (req, res) => {
   const forms = google.forms({ version: 'v1', auth: oauth2Client });
 
   try {
+    // **Get User Info**
+    const oauth2 = google.oauth2({ auth: oauth2Client, version: 'v2' });
+    const userInfoResponse = await oauth2.userinfo.get();
+    const userEmail = userInfoResponse.data.email;
+
+    if (!userEmail) {
+      return res.status(400).json({ error: 'Unable to retrieve user email' });
+    }
+
+    // **Check Usage Limits**
+    let user = await User.findOne({ email: userEmail });
+
+    if (!user) {
+      // New user, create a record
+      user = new User({ email: userEmail });
+    }
+
+    if (user.usageCount >= 2 && !user.hasPaid) {
+      // User has reached the free usage limit
+      return res.status(402).json({
+        error:
+          'Free usage limit reached. Please upgrade your plan to continue using the service.',
+      });
+    }
+
     // Validate request body
     if (!title || !questions || !Array.isArray(questions)) {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    // Create a new form
+    // Step 1: Create a new form with only the title
     const createResponse = await forms.forms.create({
       requestBody: {
         info: {
-          title,
-          description,
+          title, // Only include the title here
         },
       },
     });
@@ -186,9 +241,22 @@ app.post('/create-form', async (req, res) => {
     const formId = createResponse.data.formId;
     console.log(`Form created with ID ${formId}`);
 
-    // Build requests to add questions
+    // Step 2: Build batchUpdate requests to add description and questions
     const requests = [];
 
+    // Add the form description
+    if (description) {
+      requests.push({
+        updateFormInfo: {
+          info: {
+            description,
+          },
+          updateMask: 'description',
+        },
+      });
+    }
+
+    // Add questions to the form
     questions.forEach((question, index) => {
       let item;
 
@@ -197,7 +265,7 @@ app.post('/create-form', async (req, res) => {
           title: question.title,
           questionItem: {
             question: {
-              required: question.required,
+              required: question.required || false,
               choiceQuestion: {
                 type: 'RADIO',
                 options: question.options.map((option) => ({ value: option })),
@@ -210,7 +278,7 @@ app.post('/create-form', async (req, res) => {
           title: question.title,
           questionItem: {
             question: {
-              required: question.required,
+              required: question.required || false,
               choiceQuestion: {
                 type: 'CHECKBOX',
                 options: question.options.map((option) => ({ value: option })),
@@ -223,7 +291,7 @@ app.post('/create-form', async (req, res) => {
           title: question.title,
           questionItem: {
             question: {
-              required: question.required,
+              required: question.required || false,
               textQuestion: {
                 paragraph: false,
               },
@@ -235,7 +303,7 @@ app.post('/create-form', async (req, res) => {
           title: question.title,
           questionItem: {
             question: {
-              required: question.required,
+              required: question.required || false,
               textQuestion: {
                 paragraph: true,
               },
@@ -247,11 +315,36 @@ app.post('/create-form', async (req, res) => {
           title: question.title,
           questionItem: {
             question: {
-              required: question.required,
+              required: question.required || false,
               choiceQuestion: {
                 type: 'DROP_DOWN',
                 options: question.options.map((option) => ({ value: option })),
               },
+            },
+          },
+        };
+      } else if (question.type === 'date') {
+        // Handling Date Questions
+        item = {
+          title: question.title,
+          questionItem: {
+            question: {
+              required: question.required || false,
+              dateQuestion: {
+                includeTime: question.includeTime || false,
+                includeYear: question.includeYear !== false, // Defaults to true unless explicitly set to false
+              },
+            },
+          },
+        };
+      } else if (question.type === 'time') {
+        // Handling Time Questions
+        item = {
+          title: question.title,
+          questionItem: {
+            question: {
+              required: question.required || false,
+              timeQuestion: {},
             },
           },
         };
@@ -269,7 +362,7 @@ app.post('/create-form', async (req, res) => {
       });
     });
 
-    // Batch update to add questions
+    // Step 3: Execute batchUpdate to apply the changes
     await forms.forms.batchUpdate({
       formId,
       requestBody: {
@@ -277,7 +370,7 @@ app.post('/create-form', async (req, res) => {
       },
     });
 
-    // Get the form's URL
+    // Step 4: Retrieve the form's URL
     const formResponse = await forms.forms.get({
       formId,
       fields: 'responderUri',
@@ -286,13 +379,17 @@ app.post('/create-form', async (req, res) => {
     const formLink = formResponse.data.responderUri;
     console.log(`Form link: ${formLink}`);
 
+    // **Update Usage Count**
+    user.usageCount += 1;
+    await user.save();
+
     // Return the form link to the user
     res.json({
       message: 'Form created successfully',
       form_link: formLink,
     });
   } catch (error) {
-    console.error('Error creating/updating form', error);
+    console.error('Error creating/updating form:', error.message);
     res.status(500).json({ error: 'An error occurred while creating the form.' });
   }
 });
