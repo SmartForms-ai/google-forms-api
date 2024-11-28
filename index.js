@@ -3,11 +3,13 @@
 const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); // Stripe initialization
+const cron = require('node-cron'); // For scheduling tasks
 require('dotenv').config();
 
 const app = express();
 
-// Middleware should be placed before your routes to parse request bodies
+// Middleware to parse request bodies
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
@@ -16,7 +18,9 @@ const PORT = process.env.PORT || 8080;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const OPENAI_REDIRECT_URI = process.env.OPENAI_REDIRECT_URI;
-const MONGO_URI = process.env.MONGO_URI; // Add MongoDB URI
+const MONGO_URI = process.env.MONGO_URI;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 // Import Mongoose
 const mongoose = require('mongoose');
@@ -42,6 +46,8 @@ const userSchema = new mongoose.Schema({
   email: { type: String, unique: true, required: true },
   usageCount: { type: Number, default: 0 },
   hasPaid: { type: Boolean, default: false },
+  stripeCustomerId: { type: String },
+  subscriptionStatus: { type: String }, // e.g., 'active', 'past_due', 'canceled'
 });
 
 const User = mongoose.model('User', userSchema);
@@ -84,7 +90,7 @@ app.get('/oauth/authorize', async (req, res) => {
       'https://www.googleapis.com/auth/forms',
       'https://www.googleapis.com/auth/drive.file',
       'https://www.googleapis.com/auth/drive.metadata.readonly',
-      'https://www.googleapis.com/auth/userinfo.email', // Added to get the user's email
+      'https://www.googleapis.com/auth/userinfo.email',
     ],
     state: openaiState, // Pass OpenAI's state parameter to Google
     prompt: 'consent',
@@ -199,7 +205,7 @@ app.post('/create-form', async (req, res) => {
   const forms = google.forms({ version: 'v1', auth: oauth2Client });
 
   try {
-    // **Get User Info**
+    // Get User Info
     const oauth2 = google.oauth2({ auth: oauth2Client, version: 'v2' });
     const userInfoResponse = await oauth2.userinfo.get();
     const userEmail = userInfoResponse.data.email;
@@ -208,7 +214,7 @@ app.post('/create-form', async (req, res) => {
       return res.status(400).json({ error: 'Unable to retrieve user email' });
     }
 
-    // **Check Usage Limits**
+    // Check Usage Limits
     let user = await User.findOne({ email: userEmail });
 
     if (!user) {
@@ -216,8 +222,12 @@ app.post('/create-form', async (req, res) => {
       user = new User({ email: userEmail });
     }
 
-    if (user.usageCount >= 2 && !user.hasPaid) {
-      // User has reached the free usage limit
+    // Check if the user has an active subscription or hasn't exceeded the free quota
+    if (
+      user.usageCount >= 5 &&
+      (!user.subscriptionStatus || user.subscriptionStatus !== 'active')
+    ) {
+      // User has reached the free usage limit and is not subscribed
       return res.status(402).json({
         error:
           'Free usage limit reached. Please upgrade your plan to continue using the service.',
@@ -379,7 +389,7 @@ app.post('/create-form', async (req, res) => {
     const formLink = formResponse.data.responderUri;
     console.log(`Form link: ${formLink}`);
 
-    // **Update Usage Count**
+    // Update Usage Count
     user.usageCount += 1;
     await user.save();
 
@@ -421,6 +431,141 @@ app.get('/list-forms', async (req, res) => {
   } catch (error) {
     console.error('Error listing forms', error);
     res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// Endpoint to create a Stripe Checkout Session
+app.post('/create-checkout-session', async (req, res) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  const accessToken = authHeader.split(' ')[1];
+  const oauth2Client = new google.auth.OAuth2();
+  oauth2Client.setCredentials({ access_token: accessToken });
+
+  try {
+    // Get User Info
+    const oauth2 = google.oauth2({ auth: oauth2Client, version: 'v2' });
+    const userInfoResponse = await oauth2.userinfo.get();
+    const userEmail = userInfoResponse.data.email;
+
+    if (!userEmail) {
+      return res.status(400).json({ error: 'Unable to retrieve user email' });
+    }
+
+    // Find or create the user in your database
+    let user = await User.findOne({ email: userEmail });
+
+    if (!user) {
+      user = new User({ email: userEmail });
+      await user.save();
+    }
+
+    // Create or retrieve the Stripe customer
+    let customer;
+    if (user.stripeCustomerId) {
+      customer = await stripe.customers.retrieve(user.stripeCustomerId);
+    } else {
+      customer = await stripe.customers.create({
+        email: userEmail,
+      });
+      user.stripeCustomerId = customer.id;
+      await user.save();
+    }
+
+    // Create the Checkout Session
+    const session = await stripe.checkout.sessions.create({
+      customer: customer.id,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: 'price_1Hh1XYZ...', // Replace with your actual Price ID
+          quantity: 1,
+        },
+      ],
+      mode: 'subscription', // Use 'payment' for one-time charges
+      success_url:
+        'https://yourdomain.com/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://yourdomain.com/cancel',
+    });
+
+    res.json({ sessionId: session.id });
+  } catch (error) {
+    console.error('Error creating checkout session:', error.message);
+    res
+      .status(500)
+      .json({ error: 'An error occurred while creating the checkout session.' });
+  }
+});
+
+// Stripe Webhook endpoint
+app.post(
+  '/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.log('Webhook signature verification failed:', err.message);
+      return res.sendStatus(400);
+    }
+
+    // Handle the event
+    switch (event.type) {
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+        const subscription = event.data.object;
+        const customerId = subscription.customer;
+        const subscriptionStatus = subscription.status;
+
+        // Find the user in your database and update subscription status
+        const user = await User.findOne({ stripeCustomerId: customerId });
+        if (user) {
+          user.subscriptionStatus = subscriptionStatus;
+          user.hasPaid = subscriptionStatus === 'active';
+          await user.save();
+        }
+        break;
+      case 'invoice.payment_failed':
+        // Handle payment failure
+        const invoice = event.data.object;
+        const customerIdFailed = invoice.customer;
+
+        const userFailed = await User.findOne({
+          stripeCustomerId: customerIdFailed,
+        });
+        if (userFailed) {
+          userFailed.subscriptionStatus = 'past_due';
+          userFailed.hasPaid = false;
+          await userFailed.save();
+        }
+        break;
+      // ... handle other event types if needed
+      default:
+        console.log(`Unhandled event type ${event.type}`);
+    }
+
+    res.sendStatus(200);
+  }
+);
+
+// Schedule a cron job to reset usage counts at midnight on the first day of every month
+cron.schedule('0 0 1 * *', async () => {
+  try {
+    await User.updateMany({}, { usageCount: 0 });
+    console.log('Usage counts have been reset');
+  } catch (error) {
+    console.error('Error resetting usage counts:', error);
   }
 });
 
